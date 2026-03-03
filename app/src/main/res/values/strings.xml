@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AstroProxy</string>
+    <string name="start_service">Start Proxy Service</string>
+    <string name="default_ws_url">ws://192.168.1.50:8080</string>
+</resources>

@@ -1,0 +1,18 @@
+# Build files
+.gradle/
+build/
+app/build/
+captures/
+
+# Large binaries
+gradle-8.4/
+*.zip
+*.zip.*
+
+# Secrets
+release.keystore
+local.properties
+
+# IDE files
+.idea/
+*.iml
