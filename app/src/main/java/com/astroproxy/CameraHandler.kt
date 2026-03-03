@@ -18,7 +18,6 @@ class CameraHandler(
     private var captureSession: CameraCaptureSession? = null
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     
-    private var imageReader: ImageReader? = null
     private val handlerThread = HandlerThread("CameraBackground").apply { start() }
     private val backgroundHandler = Handler(handlerThread.looper)
 
@@ -27,60 +26,55 @@ class CameraHandler(
         try {
             val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
                 cameraManager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
-            } ?: throw Exception("Hardware Error: No rear camera detected.")
+            } ?: throw Exception("No rear camera found")
 
             cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-                override fun onOpened(camera: CameraDevice) { 
-                    cameraDevice = camera 
-                }
+                override fun onOpened(camera: CameraDevice) { cameraDevice = camera }
                 override fun onDisconnected(camera: CameraDevice) { 
                     camera.close()
-                    onError("System: Camera disconnected by OS.")
+                    cameraDevice = null
                 }
-                override fun onError(camera: CameraDevice, error: Int) { 
+                override fun onError(camera: CameraDevice, error: Int) {
                     camera.close()
-                    val msg = when(error) {
-                        ERROR_CAMERA_IN_USE -> "Hardware Error: Camera already in use by another app."
-                        ERROR_MAX_CAMERAS_IN_USE -> "System Error: Too many camera sessions open."
-                        ERROR_CAMERA_DISABLED -> "Security Error: Camera disabled by device policy."
-                        else -> "Internal Error: Camera failed with code $error"
-                    }
-                    onError(msg)
+                    cameraDevice = null
+                    onError("Camera Hardware Error $error. Resetting...")
+                    // Auto-reopen on hardware failure
+                    Handler(backgroundHandler.looper).postDelayed({ openCamera() }, 1000)
                 }
             }, backgroundHandler)
         } catch (e: Exception) {
-            onError("Initialization Failed: ${e.message}")
+            onError("Init Error: ${e.message}")
         }
     }
 
     fun takePhoto(params: CaptureParams?) {
-        val device = cameraDevice ?: return onError("State Error: Camera not initialized yet.")
+        val device = cameraDevice ?: return onError("Camera Not Ready")
         
         try {
-            val format = if (params?.format == "RAW") ImageFormat.RAW_SENSOR else ImageFormat.JPEG
+            val isRaw = params?.format == "RAW"
+            val format = if (isRaw) ImageFormat.RAW_SENSOR else ImageFormat.JPEG
             val characteristics = cameraManager.getCameraCharacteristics(device.id)
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            
-            val size = map?.getOutputSizes(format)?.maxByOrNull { it.width * it.height } 
-                ?: return onError("Format Error: Device does not support ${params?.format ?: "JPEG"}")
+            val size = map?.getOutputSizes(format)?.maxByOrNull { it.width * it.height } ?: return onError("Format Unsupported")
 
-            imageReader = ImageReader.newInstance(size.width, size.height, format, 2).apply {
-                setOnImageAvailableListener({ reader ->
-                    val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-                    val buffer = image.planes[0].buffer
-                    val bytes = ByteArray(buffer.remaining())
-                    buffer.get(bytes)
-                    image.close()
-                    onImageCaptured(if (format == ImageFormat.RAW_SENSOR) "RAW" else "JPG", bytes)
-                }, backgroundHandler)
-            }
+            // Create a fresh reader for this shot
+            val reader = ImageReader.newInstance(size.width, size.height, format, 1)
+            reader.setOnImageAvailableListener({ r ->
+                val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                val plane = image.planes[0]
+                val buffer = plane.buffer
+                val bytes = ByteArray(buffer.remaining())
+                buffer.get(bytes)
+                image.close()
+                r.close() // Close reader immediately after extracting bytes
+                onImageCaptured(if (isRaw) "RAW" else "JPG", bytes)
+            }, backgroundHandler)
 
-            val surfaces = listOf(imageReader!!.surface)
-            device.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+            device.createCaptureSession(listOf(reader.surface), object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     captureSession = session
                     val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-                    requestBuilder.addTarget(imageReader!!.surface)
+                    requestBuilder.addTarget(reader.surface)
 
                     if (params?.iso != null && params.exposureTimeNs != null) {
                         requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
@@ -91,7 +85,8 @@ class CameraHandler(
                     session.capture(requestBuilder.build(), null, backgroundHandler)
                 }
                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                    onError("Session Error: Could not configure capture pipeline.")
+                    onError("Pipeline Config Failed")
+                    reader.close()
                 }
             }, backgroundHandler)
         } catch (e: Exception) {
@@ -100,9 +95,7 @@ class CameraHandler(
     }
 
     fun close() {
-        captureSession?.close()
         cameraDevice?.close()
-        imageReader?.close()
         handlerThread.quitSafely()
     }
 }
